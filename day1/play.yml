@@ -1,0 +1,230 @@
+- name: VAGRANT UP
+  hosts: localhost
+  tasks:
+    - name: UP
+      shell: vagrant up
+
+- name: k8s
+  hosts: servers
+  become: yes
+  tasks:
+    - name: YUM install modules
+      yum:
+        name: "{{item}}"
+      with_items:
+        - yum-utils
+        - device-mapper-persistent-data
+        - lvm2
+
+    - name: Docker repo add
+      yum_repository:
+        name:  docker-ce-edge
+        description: docker repos
+        baseurl: https://download.docker.com/linux/centos/7/$basearch/edge
+        gpgcheck: yes
+        gpgkey: https://download.docker.com/linux/centos/gpg
+
+    - name: DOCKER install modules
+      yum:
+        name: "{{item}}"
+      with_items:
+        - docker-ce
+        - runc
+
+    - name: Kube repo add
+      yum_repository:
+        name:  Kubernetes
+        description: kubernetes
+        baseurl: https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+        enabled: true
+
+    - name: Import GPG Key
+      rpm_key:
+        state: present
+        key: "{{ item }}"
+      with_items:
+        - https://packages.cloud.google.com/yum/doc/yum-key.gpg
+        - https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+
+
+    - name: Disable SeLinux
+      selinux:
+        state: disabled
+
+    - name: KUBE install modules
+      yum:
+        name: "{{item}}"
+        enablerepo: "Kubernetes"
+      with_items:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: docker dir Create
+      file:
+        path: /etc/docker/
+        owner: root
+        force: yes
+        group: root
+        recurse: yes
+        state: directory
+
+    - name: docker json cgroupdriver
+      copy:
+        content: >
+         {
+           "exec-opts": [
+            "native.cgroupdriver=systemd"
+            ]
+         }
+        dest: /etc/docker/daemon.json
+
+    - name: IPtables Disable
+      copy:
+        dest: /etc/sysctl.d/k8s.conf
+        src: k8s.conf
+        force: yes
+
+    - name: Shell sysctl restart
+      shell: 'sysctl --system'
+#      sysctl:
+#        name: "{{item}}"
+#        value: 1
+#        sysctl_set: yes
+#        state: present
+#        sysctl_file: /etc/sysctl.conf
+#      with_items:
+#        - net.bridge.bridge-nf-call-iptables
+#        - net.bridge.bridge-nf-call-ip6tables
+
+    - name: swap disable
+      shell: sed -i 's/[^#]\(.*swap.*\)/# \1/' /etc/fstab && swapoff --all
+
+    - name: Services  Docker enable/start
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: Services kubelet enable
+      systemd:
+        name: kubelet
+        enabled: yes
+
+
+- name: MASTER FIX
+  hosts: master
+  tasks:
+
+    - name: KUBE RESET
+      shell: kubeadm reset
+
+    - name: KUBE INIT
+      shell: kubeadm init --apiserver-advertise-address 192.168.56.10 --token {{token}} --pod-network-cidr 10.244.0.0/16
+
+    - name: .kube create
+      file:
+        path: /root/.kube/
+        owner: root
+        force: yes
+        group: root
+        recurse: yes
+        state: directory
+
+    - name: Copy config.adm
+      copy:
+        dest: /root/.kube/config
+        force: yes
+        remote_src: yes
+        src: /etc/kubernetes/admin.conf
+        group: root
+        owner: root
+
+    - name: flanell copy
+      copy:
+        dest: /root/kube-flannel.yaml
+        src: kube-flannel.yaml
+        force: yes
+
+    - name: Flanell start
+      shell: kubectl apply -f /root/kube-flannel.yaml
+
+    - name: Create dashboard
+      shell: kubectl create -f https://raw.githubusercontent.com/kubernetes/dashboard/master/src/deploy/recommended/kubernetes-dashboard.yaml
+
+    - name: admin-user copy
+      copy:
+        dest: /root/admin-user.yaml
+        src: admin-user.yaml
+        force: yes
+
+    - name: Create admin
+      shell: kubectl create -f /root/admin-user.yaml
+
+    - name: .conf fetching
+      fetch:
+        dest: ~/.kube/
+        src: /root/.kube/config
+        flat: yes
+
+
+- name: WOrker
+  hosts: minion
+
+  tasks:
+
+    - name: KUBE RESET
+      shell: kubeadm reset
+
+    - name: JOIN
+      shell: kubeadm join 192.168.56.10:6443 --token {{token}} --discovery-token-unsafe-skip-ca-verification
+
+
+- name: LOCLAHOST
+  hosts: localhost
+  become: yes
+  tasks:
+
+    - name: Kube repo add
+      copy:
+        dest: /etc/yum.repos.d/kubernetes.repo
+        force: yes
+        src: kubernetes.repo
+
+    - name: YUM install modules
+      yum:
+        name: kubectl
+
+    - name: TOKEN ADMIN
+      become: yes
+      become_user: student
+      shell: kubectl -n kube-system describe secret $(kubectl -n kube-system get secret | grep admin-user | awk '{print $1}') > /home/student/Documents/tooken
+
+    - name: KUBECTL PRoxy
+      become: yes
+      become_user: student
+      shell: kubectl proxy --address='0.0.0.0' --accept-hosts='^*$' &
+
+    - name: APPLY
+      shell: kubectl apply -f {{item}}
+      become: yes
+      become_user: student
+      with_items:
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/namespace.yaml
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/default-backend.yaml
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/configmap.yaml
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/tcp-services-configmap.yaml
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/udp-services-configmap.yaml
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/rbac.yaml
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/with-rbac.yaml
+        - https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/provider/baremetal/service-nodeport.yaml
+
+    - name: patch
+      become: yes
+      become_user: student
+      shell: kubectl patch svc ingress-nginx -n ingress-nginx --patch '{ "spec":{"externalIPs":[ "192.168.56.10" ] }}'
+
+    - name: Start Mozilla
+      become: yes
+      become_user: student
+      shell: firefox http://localhost:8001/api/v1/namespaces/kube-system/services/https:kubernetes-dashboard:/proxy/ &

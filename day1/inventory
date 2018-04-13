@@ -1,0 +1,9 @@
+[servers]
+master ansible_host=192.168.56.10
+minion ansible_host=192.168.56.20
+
+[servers:vars]
+token = 12345f.0123456789abcdef
+ansible_connection = ssh
+ansible_ssh_user = root
+ansible_ssh_pass = vagrant
